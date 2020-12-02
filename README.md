@@ -1,4 +1,5 @@
-# IBM model code for "The effectiveness of population-wide, rapid antigen test based screening in reducing SARS-CoV-2 infection prevalence in Slovakia"
+# IBM model code
+### Complements analysis for "The effectiveness of population-wide, rapid antigen test based screening in reducing SARS-CoV-2 infection prevalence in Slovakia"
 
 ## Dependencies
 
