@@ -290,3 +290,17 @@ getRt <- function(data, period){
   infected <- data[part_id > 0 & infected_by %in% infectious]
   return(nrow(infected)/length(infectious))
 }
+
+#' Function to calculate Rt in a given period, stratified by intra and extra household transmission
+#' * Returns average number of secondary infections for a cohort of infectious individuals, who 
+#'   were infectious in the period provided and who completed their infectious period
+#' * Requires large enough period so those with long infectious period are not censored
+getRtHH <- function(data, period){
+  #primary cases
+  infectious <- data[part_id > 0 & recovered_at > -1 & recovered_at < period[2] & infectious_at >= period[1]]
+  
+  hh_rt = nrow(merge(infectious, data, by.x="part_id", by.y="infected_by", all.x=T)[household_id.x == household_id.y])/nrow(infectious)
+  nohh_rt = nrow(merge(infectious, data, by.x="part_id", by.y="infected_by", all.x=T)[household_id.x != household_id.y])/nrow(infectious)
+  
+  return(c("hh" = hh_rt, "nohh" = nohh_rt))
+}

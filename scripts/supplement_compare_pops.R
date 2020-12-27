@@ -1,7 +1,6 @@
 setwd("~/workspace/covid_svk/")
 
 library("Rcpp")
-library("RcppGSL")
 library("data.table")
 library("distcrete")
 library("qs")
@@ -10,64 +9,55 @@ library("tictoc")
 source("./scripts/functions.R")
 source("./scripts/read_data.R")
 
-#' where should output files be saved?
-out_folder <- "./out"
+out_folder <- "/media/lsh1604011/writable/home/kevin/workspace/slovak_runs/"
 
-#' compile c++ code for model using Rcpp
-#' compile with openmp flag to increase model speed
-Sys.setenv(PKG_CPPFLAGS = "-fopenmp")
+Sys.setenv(PKG_CPPFLAGS = "-fopenmp") #compile with openmp to reduce model speed
 sourceCpp(
-  "./model/covidIBM.cpp",
-  rebuild = T, cacheDir = "./model/build", verbose = T
+  "~/workspace/covid_svk/model/covidIBMslovakia_quick.cpp",
+  rebuild = T,
+  cacheDir = "./model/build",
+  verbose = T
 )
 
-#' target population size to use
 n_pop <- 77771
-#' observed number who attended test in test-rounds
 n_test <- c(48320, 44197, 43983)
-#' observed number who tested positive in first test-round
-#' used to calculate prevalence when test starts
 n_pos <- 1569
 
-#' assume one timestep per day
+set.seed(101)
 tstep_day <- 1
-
-#' number of days in which full model is ran
 days <- 365
-
-#' target number of infectious individuals at t=1
 init_infected <- 10
-
-#' target R0
 target_R0 <- 1.5
 
-#' number of days to start lockdown, relative to day when mass-testing is implemented
-#' is only used in scenarios where lockdown is implemented
 lockdown_start <- -7
-
-#' number of model runs required
-runs <- 1
 
 prevalence_trigger <- n_pos/n_test[1]
 prop_tested <- (n_test/n_pop) / (sum(popdata[agegroup %in% age_groups[age_high > 10 & age_low < 65, name], N])/sum(popdata[, N]))
-if(!dir.exists(out_folder)){
-  dir.create(out_folder)
+
+getRtHH <- function(data, period){
+  #primary cases
+  infectious <- data[part_id > 0 & recovered_at > -1 & recovered_at < period[2] & infectious_at >= period[1], part_id]
+  if(length(infectious) == 0){ warning("no infectious individuals in period"); return(NA) }
+  #secondary cases
+  
+  rt_hh = mean(sapply(infectious, function(x){data[infected_by == x & household_id == data[part_id==x, household_id], .N]}))
+  rt_ohh = mean(sapply(infectious, function(x){data[infected_by == x & household_id != data[part_id==x, household_id], .N]}))
+  
+  return(c("rt_household"=rt_hh, "rt_outside"=rt_ohh))
 }
 
+outRt <- list()
+
+out <- list()
+outbak <- out
+runs <- 100
 for(r in 1:runs){
+  message(sprintf("Run %s/%s", r, runs))
   tictoc::tic()
   
-  #' set a seed for random number generator in R
-  #' note, does not affect random number generator used in C++ model
-  set.seed(r)
-  
-  #' create a new population for this run
   bootstrapped_pop <- generatePopulation(n_pop, verbose=T)
-  
-  #' total household age-pairs for household contact matrix
   bootstrap_sample_household_total <- bootstrapped_pop[[2]]
   
-  #' population of individuals
   bootstrapped_pop = bootstrapped_pop[[1]]
   bootstrapped_pop <- setPopDistributions(bootstrapped_pop)
   bootstrapped_pop <- setClinicalFraction(bootstrapped_pop, age_groups)
@@ -84,97 +74,174 @@ for(r in 1:runs){
   
   #' this is the matrix for outside household mixing
   contact_matrix_outside_household <- Reduce("+", list(
-    #' assume at-work contacts are reduced by 25% compared to pre-Covid levels
     contact_matrices_work * 0.75,
-    #' assume primary schools are open (no change in contacts for u12), and secondary
-    #'  schools are closed (no at-school contacts for those 12+)
-    contact_matrices_school * matrix(
-      c(c(1,1,0.5,rep(0,13)),
-        c(1,1,0.5,rep(0,13)),
-        c(0.5,0.5,0.5,rep(0,13)),
-        rep(0, 16*13)
-      ), ncol=16, byrow=T
-    ),
-    #' assume other contacts are reduced by 75%
+    contact_matrices_school * matrix(c(c(1,1,0.5,rep(0,13)),c(1,1,0.5,rep(0,13)),c(0.5,0.5,0.5,rep(0,13)),rep(0, 16*13)), ncol=16, byrow=T), #secondary schools closed
     contact_matrices_other * 0.25
   ))
   
-  #' make contact matrix symmetric for this population
-  #' * ensures total number of contacts between age-groups
-  #'    i and j == those between j and i
-  contact_matrix_outside_household <- (
-    contact_matrix_outside_household * bootstrap_population_popsize +t(
-      contact_matrix_outside_household * bootstrap_population_popsize
-    )
+  #' make symmetric for this population
+  contact_matrix_outside_household = (contact_matrix_outside_household * bootstrap_population_popsize +
+                                        t(contact_matrix_outside_household * bootstrap_population_popsize)
   )/2/bootstrap_population_popsize
   
-  #' calibrate to R0
-  #' * run model multiple times to validate target R0 level is reached when averaging
-  #'   over start of multiple simulations
   cmm_matrices = list(
     "household" = contact_matrix_household$rate_adjusted * contact_prob_household,
     "outside_household" = t(contact_matrix_outside_household)
   )
+  
+  out[[length(out)+1]] <- list(
+    pop = bootstrapped_pop,
+    cmm_matrices = cmm_matrices
+  )
+}
+
+#average household size
+quantile(sapply(out, function(x) mean(x$pop[, .N, by="household_id"][, N])), c(0.5, 0.025, 0.975))
+
+#population distribution  
+x = rbindlist(lapply(out, function(x){
+  return(x$pop[, .N, by="age_group"][, N := N/nrow(x$pop)][order(age_group)])
+}))[, .(median=median(N), low95=quantile(N, 0.025), high95=quantile(N, 0.975)), by="age_group"][order(age_group)]
+
+eig = sapply(out, function(x){
+  return(eigen(x$cmm_matrices$household)$values[1])
+})
+
+eig_i <- which(abs(eig - median(eig)) == min(abs(eig - median(eig))))[1]
+med_cm <- out[[eig_i]]$cmm_matrices$household
+med_cm = as.data.table(med_cm)
+colnames(med_cm)=age_groups$name
+med_cm[, "contactor"] = age_groups$name
+med_cm = melt(med_cm, id.vars="contactor", variable.name="contactee")
+
+med_cm_o <- out[[eig_i]]$cmm_matrices$outside_household
+med_cm_o = as.data.table(med_cm_o)
+colnames(med_cm_o)=age_groups$name
+med_cm_o[, "contactor"] = age_groups$name
+med_cm_o = melt(med_cm_o, id.vars="contactor", variable.name="contactee")
+
+syn_cm_home = contact_matrices_home_symmetric#contact_matrices_home
+syn_cm_home = as.data.table(syn_cm_home)
+colnames(syn_cm_home)=age_groups$name
+syn_cm_home[, "contactor"] = age_groups$name
+syn_cm_home = melt(syn_cm_home, id.vars="contactor", variable.name="contactee")
+
+syn_cm_o = contact_matrix_outside_household
+syn_cm_o = as.data.table(syn_cm_o)
+colnames(syn_cm_o)=age_groups$name
+syn_cm_o[, "contactor"] = age_groups$name
+syn_cm_o = melt(syn_cm_o, id.vars="contactor", variable.name="contactee")
+
+
+cm_plot = rbindlist(list(
+  med_cm[, setting := "home"][, type := "model"],
+  med_cm_o[, setting := "outside home"][, type := "model"],
+  syn_cm_home[, setting := "home"][, type := "synthetic"],
+  syn_cm_o[, setting := "outside home"][, type := "synthetic"]
+))
+
+lshcols <- c("#000000", "#0D5257", "#00BF6F", "#00AEC7", "#A7A8AA")
+
+library(patchwork)
+
+plot_home = ggplot(
+  cm_plot[setting == "home"],
+  aes(x=factor(contactor, age_groups$name), y=factor(contactee, age_groups$name), fill=value)
+)+geom_tile(
+)+facet_grid(setting~type)+scale_fill_gradientn(
+  colours=c(lshcols[2], high=lshcols[3])
+)+theme_classic()+labs(
+  x="contactor (age group)", y="contactee (age group)", fill="avg contacts\nper day"
+)+theme(axis.text.x = element_text(angle=45, hjust=1))
+
+
+plot_nohome = ggplot(cm_plot[setting == "outside home"],
+  aes(x=factor(contactor, age_groups$name), y=factor(contactee, age_groups$name), fill=value)
+)+geom_tile(
+)+facet_grid(setting~type)+facet_grid(setting~type)+scale_fill_gradientn(
+  colours=c(lshcols[2], lshcols[3], "#FFFFFF", "#00AEC7", "#FFB81C", "#FE5000")
+)+theme_classic()+labs(
+  x="contactor (age group)", y="contactee (age group)", fill="avg contacts\nper day"
+)+theme(axis.text.x = element_text(angle=45, hjust=1))
+
+plot_home/plot_nohome + plot_annotation(tag_levels = 'A')
+ggsave("./suppl_compare_matrices.png")
+
+plot_pop = ggplot(
+  x[, group := "model"],
+  aes(
+    x=factor(
+      as.character(age_group),
+      as.character(0:15),
+      age_groups$name
+    ),
+    y=median, ymin=low95, ymax=high95, colour=group, fill=group
+  )
+)+geom_ribbon(
+  aes(group=group)
+)+geom_line(
+  colour=lshcols[2],
+  aes(group=group)
+)+geom_point(
+  data=data.table(
+    age_group=0:15,
+    median=popdata$N/sum(popdata$N),
+    low95=rep(0,16),
+    high95=rep(0,16),
+    group=rep("UNWPP", 16)
+  ),
+  shape=15,
+  size=3
+)+coord_cartesian(
+  ylim=c(0.04,0.085)
+)+theme_classic()+labs(
+  x="age group",
+  y="relative population size (%)",
+  colour = "population",
+  fill = "population"
+)+scale_y_continuous(labels=scales::percent)+scale_colour_manual(
+  values=c("UNWPP" = lshcols[3], "model" = lshcols[2])
+)+scale_fill_manual(
+  values=c("UNWPP" = lshcols[3], "model" = lshcols[2])
+)
+
+plot_pop/plot_home/plot_nohome + plot_annotation(tag_levels = 'A')
+ggsave("./compare_model_pop.png", units="mm", width=210, height=297*0.75)
+  #' calibrate to R0
   u <- calculateSusceptibility(cmm_matrices, target_R0)
   bootstrapped_pop <- setSusceptibility(bootstrapped_pop, u)
   
-  #' baseline parameters for IBM model
   ibm_params_base <- list(
-    #population of individuals that is used in model
     population = bootstrapped_pop,
-    #total number of households
     n_households = length(unique(bootstrapped_pop[, household_id])),
-    #number of initial infectious individuals
     n_init_infected = init_infected,
-    #total number of agegroups
     agegroups = nrow(age_groups), 
-    #days to run the model (if not interrupted prematurely)
     days = 365,
-    #time-step used per day
     tstep_day = tstep_day,
-    #should quick version of model be used?
-    #' if TRUE: faster, does not track who-infects-whom (uses IBM-CMM-hybrid)
-    #' if FALSE: slower, does track who-infects-whom (full IBM)
-    model_quick = FALSE,
-    #allow model to be interrupted after onset of interventions
+    model_quick = TRUE,
     iv_stop = FALSE,
-    #contact probability by timestep
     contact_household = 1-(1-contact_prob_household)^(1/tstep_day),
-    #convert contact matrix to probability of contact between any 2 individuals of ages i and j
     contact_matrix = {
       x = t(t(contact_matrix_outside_household) / bootstrap_population_popsize);
       diag(x) = diag(contact_matrix_outside_household)/(bootstrap_population_popsize-1);
       x
     },
-    #should a lockdown be implemented?
     lockdown = list(
       start_value = lockdown_start,
       effect = 1,
       test_after = -lockdown_start
     ),
-    #should testing be implemented?
     interventions = list(list(
-      #when to start the intervention?
-      # type 0: start trigger is prevalence of infectious people
-      # type 1: start trigger is days after first intervention
-      start_type = 0,
+      start_type = 0, #"prevalence",
       start_value = prevalence_trigger,
       start_time = -1,
-      #duration this intervention is active for
-      duration = 10,
-      #proportion of eligible people who attend testing
-      coverage = 1.00,
-      #age groups eligible for testing
-      age_eligible = which(!(age_groups[, age_high] < 10 | age_groups[, age_low] >= 65))-1,
-      #compliance of self-quarantine with those who test positive
-      compliance_positive = 1,
-      #compliance of self-quarantine for household members who test positive
-      compliance_household = 0,
-      #compliance of self-quarantine of eligible people who do not attend testing
-      compliance_notest = 0
+      duration = 10, #days
+      coverage = 0.86,
+      age_eligible = which(!(age_groups[, age_high] < 10 | age_groups[, age_low] >= 65))-1, #age groups tested
+      compliance_positive = 1, #compliance of those testing positive
+      compliance_household = 0, #compliance of household members of those who test positive
+      compliance_notest = 0 #compliance of those eligible but not tested
     )),
-    #what parameters should be used for testing?
-    #* test specificity and sensitivity
     testpars = list(
       test_specificity = covid_parameters$test_specificity,
       test_sensitivity_preinfectious = covid_parameters$test_sensitivity_preinfectious,
@@ -184,19 +251,16 @@ for(r in 1:runs){
     )
   )
   
-  #seed for random number generator in C++ model
   model_seed <- r
   
   #scenario 0 - no lockdown or testing
   scen0_baseline <- as.data.table(covidIBM(getIVtype(ibm_params_base, test_coverage=c(), compliance_pos=1, compliance_hh=1), model_seed)$population)
   
   #scenario 1 - no lockdown effect; 
-  #scenario 1 - full compliance of household members
   scen1_test1_compl_full <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1)]), compliance_pos=1, compliance_hh=1, iv_stop=7*4), model_seed)
   scen1_test2_compl_full <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1,2)]), compliance_pos=1, compliance_hh=1, iv_stop=7*3), model_seed)
   scen1_test3_compl_full <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1,2,3)]), compliance_pos=1, compliance_hh=1, iv_stop=7*2), model_seed)
   
-  #scenario 1 - no compliance of household members
   scen1_test1_compl_none <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1)]), compliance_pos=1, compliance_hh=0, iv_stop=7*4), model_seed)
   scen1_test2_compl_none <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1,2)]), compliance_pos=1, compliance_hh=0, iv_stop=7*3), model_seed)
   scen1_test3_compl_none <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1,2,3)]), compliance_pos=1, compliance_hh=0, iv_stop=7*2), model_seed)
@@ -205,41 +269,28 @@ for(r in 1:runs){
   time_test1 <- scen1_test1_compl_full$intervention[[1]]$start_t
   target_Rt <- 1
   
-  #calculate Rt in period before implementation of test
-  rtHH = getRtHH(
+  rt = getRt(
     as.data.table(scen1_test1_compl_full$population), 
-    #use longest period of possible infectious period to calculate Rt
     time_test1 + c(-ceiling(qgamma(
       0.999, shape=covid_parameters$dS$values$k,
       scale=covid_parameters$dS$values$mu/covid_parameters$dS$values$k)
     ), 0)
   )
   
-  if(rtHH["hh"] >= target_Rt){
-    stop("HH transmission is too high")
-  }
+  scen2_test0 <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(0), iv_stop=7*4, compliance_pos=0, compliance_hh=0, lockdown_start = lockdown_start + time_test1, lockdown_effect=target_Rt/rt), model_seed)
   
-  #scenario 2 - lockdown without testing
-  scen2_test0 <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(0), iv_stop=7*4, compliance_pos=0, compliance_hh=0, lockdown_start = lockdown_start + time_test1, lockdown_effect=(target_Rt - rtHH["hh"])/rtHH["nohh"]), model_seed)
+  scen2_test1_compl_full <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1)]), compliance_pos=1, compliance_hh=1, iv_stop=7*4, lockdown_start = lockdown_start + time_test1, lockdown_effect=target_Rt/rt), model_seed)
+  scen2_test2_compl_full <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1,2)]), compliance_pos=1, compliance_hh=1, iv_stop=7*3, lockdown_start = lockdown_start + time_test1, lockdown_effect=target_Rt/rt), model_seed)
+  scen2_test3_compl_full <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1,2,3)]), compliance_pos=1, compliance_hh=1, iv_stop=7*2, lockdown_start = lockdown_start + time_test1, lockdown_effect=target_Rt/rt), model_seed)
   
-  #scenario 2 - lockdown with tests and full compliance of household members
-  scen2_test1_compl_full <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1)]), compliance_pos=1, compliance_hh=1, iv_stop=7*4, lockdown_start = lockdown_start + time_test1, lockdown_effect=(target_Rt - rtHH["hh"])/rtHH["nohh"]), model_seed)
-  scen2_test2_compl_full <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1,2)]), compliance_pos=1, compliance_hh=1, iv_stop=7*3, lockdown_start = lockdown_start + time_test1, lockdown_effect=(target_Rt - rtHH["hh"])/rtHH["nohh"]), model_seed)
-  scen2_test3_compl_full <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1,2,3)]), compliance_pos=1, compliance_hh=1, iv_stop=7*2, lockdown_start = lockdown_start + time_test1, lockdown_effect=(target_Rt - rtHH["hh"])/rtHH["nohh"]), model_seed)
+  scen2_test1_compl_none <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1)]), compliance_pos=1, compliance_hh=0, iv_stop=7*4, lockdown_start = lockdown_start + time_test1, lockdown_effect=target_Rt/rt), model_seed)
+  scen2_test2_compl_none <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1,2)]), compliance_pos=1, compliance_hh=0, iv_stop=7*3, lockdown_start = lockdown_start + time_test1, lockdown_effect=target_Rt/rt), model_seed)
+  scen2_test3_compl_none <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1,2,3)]), compliance_pos=1, compliance_hh=0, iv_stop=7*2, lockdown_start = lockdown_start + time_test1, lockdown_effect=target_Rt/rt), model_seed)
   
-  #scenario 2 - lockdown with tests and no compliance of household members
-  scen2_test1_compl_none <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1)]), compliance_pos=1, compliance_hh=0, iv_stop=7*4, lockdown_start = lockdown_start + time_test1, lockdown_effect=(target_Rt - rtHH["hh"])/rtHH["nohh"]), model_seed)
-  scen2_test2_compl_none <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1,2)]), compliance_pos=1, compliance_hh=0, iv_stop=7*3, lockdown_start = lockdown_start + time_test1, lockdown_effect=(target_Rt - rtHH["hh"])/rtHH["nohh"]), model_seed)
-  scen2_test3_compl_none <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1,2,3)]), compliance_pos=1, compliance_hh=0, iv_stop=7*2, lockdown_start = lockdown_start + time_test1, lockdown_effect=(target_Rt - rtHH["hh"])/rtHH["nohh"]), model_seed)
-  
-  #scenario 3 - lockdown brings Rt to 0.6, assume compliance with testing
+  #scenario 3 - lockdown brings Rt to 0.6, no compliance with testing
   target_Rt <- 0.6
-  if(rtHH["hh"] >= target_Rt){
-    stop("HH transmission is too high")
-  }
-  scen3_test3_compl_none <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1,2,3)]), compliance_pos=0, compliance_hh=0, iv_stop=7*2, lockdown_start = lockdown_start + time_test1, lockdown_effect=(target_Rt - rtHH["hh"])/rtHH["nohh"]), model_seed)
+  scen3_test3_compl_none <- covidIBM(getIVtype(ibm_params_base, test_coverage=c(prop_tested[c(1,2,3)]), compliance_pos=0, compliance_hh=0, iv_stop=7*2, lockdown_start = lockdown_start + time_test1, lockdown_effect=target_Rt/rt), model_seed)
   
-  #save results - infected individuals
   qs::qsave(scen0_baseline[part_id > 0], sprintf("%s/run_%s_scen0_baseline.qs", out_folder, r))
   qs::qsave(as.data.table(scen2_test0$population)[part_id > 0], sprintf("%s/run_%s_scen2_test0.qs", out_folder, r))
   
@@ -257,8 +308,8 @@ for(r in 1:runs){
   qs::qsave(as.data.table(scen2_test3_compl_none$population)[part_id > 0], sprintf("%s/run_%s_scen2_test3_compl_none.qs", out_folder, r))
   qs::qsave(as.data.table(scen3_test3_compl_none$population)[part_id > 0], sprintf("%s/run_%s_scen3_test3_compl_none.qs", out_folder, r))
   
-  #' Summarized results - test results in scenario
   tests <- sapply(scen3_test3_compl_none$intervention, "[[", "start_t")
+  
   out <- rbindlist(lapply(c(1:2), function(a){
     rbindlist(lapply(c(1:3), function(b, a){
       rbindlist(lapply(c("full", "none"), function(d, b, a){
@@ -301,7 +352,6 @@ for(r in 1:runs){
     return(z)
   }, iv))
   
-  #' combine summarized results
   out <- rbindlist(list(
     out, out_baseline, out_scen3
   ), use.names = TRUE)
@@ -309,7 +359,6 @@ for(r in 1:runs){
   out[, rt := rt]
   setorder(out, scenario, compliance, test)
   
-  #' save data
   fwrite(out, sprintf("%s/run_%s.csv", out_folder, r))
   
   tictoc::toc()

@@ -131,7 +131,7 @@ public:
         f = 0.5;
       }
       //if hh_index is 0, contacts are household members, and homogeneous mixing is used
-      double lambda = m_u * f * (household_member ? beta_hh : (beta(infected_contact->m_age, m_age) * m_lockdown_effect));
+      double lambda = m_u * f * (household_member ? beta_hh : ( beta(infected_contact->m_age, m_age)*m_lockdown_effect ));
       
       bool is_infected = random_generator->Binomial(1, lambda);
       if(is_infected){
@@ -158,7 +158,7 @@ public:
         f = 0.5;
       }
       
-      double lambda = m_u * f * (hhmember ? beta_hh : (beta(m_age, contacts_age)) * m_lockdown_effect);
+      double lambda = m_u * f * (hhmember ? beta_hh : ( beta(contacts_age, m_age)*m_lockdown_effect ));
       bool is_infected = random_generator->Binomial(1, 1-std::pow((1-lambda),N));
       if(is_infected){
         m_status = preinfectious;
