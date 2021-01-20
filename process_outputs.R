@@ -3,11 +3,13 @@ library("data.table")
 library("ggplot2")
 library("patchwork")
 
+setwd("~/workspace/covid_svk")
+
 #' TODO: still need to clean this script
 
 lshcols <- c("#000000", "#0D5257", "#00BF6F", "#00AEC7", "#A7A8AA", "#32006E", "#1E22AA", "#FE5000", "#FFB81C")
 out_folder <- "./out/"
-runs <- 1
+runs <- 400
 #how many weeks to plot before the first test and after the last test?
 plotdata_weeks <- c(3,2)
 
@@ -259,6 +261,86 @@ plot_prevtime <- ggplot(
   y = "prevalence (per 1000)"
 )+theme(legend.position = "bottom")
 
+plot_inctime <- ggplot(
+  data=NULL,
+  aes(x = relative_time, y = median, group=test)
+)+facet_grid(
+  factor(
+    as.character(scen),
+    as.character(1:2),
+    c("No lockdown", "Lockdown")
+  )~paste0("Compliance household: ", compliance),
+  scales="free_y"
+)+geom_vline(
+  data=data.table(
+    relative_time=c(0,7,14)
+  ), aes(xintercept=relative_time)
+)+geom_vline(
+  data=data.table(
+    relative_time=c(-7),
+    scen=2
+  ), aes(xintercept=relative_time), linetype=2
+)+geom_line(
+  data=plotdata2[type=="incidence" & scen==3][, -c("compliance")][, test := 3][, scen := 2],
+  aes(colour=collab)
+)+geom_ribbon(
+  data=plotdata2[type=="incidence" & scen==3][, -c("compliance")][, test := 3][, scen := 2],
+  colour=NA, alpha=0.5,
+  aes(ymin=low95, ymax=high95, fill=collab)
+)+geom_line(
+  data=plotdata2[type=="incidence" & scen > 0 & scen < 3 & test == 3],
+  aes(colour=collab)
+)+geom_ribbon(
+  data=plotdata2[type=="incidence" & scen > 0 & scen < 3 & test == 3],
+  colour=NA, alpha=0.5,
+  aes(ymin=low95, ymax=high95, fill=collab)
+)+geom_line(
+  data=plotdata2[type=="incidence" & scen > 0 & scen < 3 & test == 2],
+  aes(colour=collab,fill=collab)
+)+geom_ribbon(
+  data=plotdata2[type=="incidence" & scen > 0 & scen < 3 & test == 2],
+  colour=NA, alpha=0.5,
+  aes(ymin=low95, ymax=high95, fill=collab)
+)+geom_line(
+  data=plotdata2[type=="incidence" & scen > 0 & scen < 3 & test == 1],
+  aes(colour=collab,fill=collab)
+)+geom_ribbon(
+  data=plotdata2[type=="incidence" & scen > 0 & scen < 3 & test == 1],
+  colour=NA, alpha=0.5,
+  aes(ymin=low95, ymax=high95, fill=collab)
+)+geom_line(
+  data=plotdata2[type=="incidence" & scen==2 & test == 0][, -c("compliance", "scen")][, test := 0][, scen := 2],
+  aes(colour=collab,fill=collab)
+)+geom_ribbon(
+  data=plotdata2[type=="incidence" & scen==2 & test == 0][, -c("compliance", "scen")][, test := 0][, scen := 2],
+  colour=NA, alpha=0.5,
+  aes(ymin=low95, ymax=high95, fill=collab)
+)+geom_line(
+  data=plotdata2[type=="incidence" & scen==0][, -c("compliance", "scen")][, test := 0][, scen := 1],
+  aes(colour=collab,fill=collab)
+)+geom_ribbon(
+  data=plotdata2[type=="incidence" & scen==0][, -c("compliance", "scen")][, test := 0][, scen := 1],
+  colour=NA, alpha=0.5,
+  aes(ymin=low95, ymax=high95, fill=collab)
+)+geom_line(
+  data=plotdata2[type=="incidence" & scen==0 & relative_time <= -7][, -c("compliance", "scen")][, test := 0][, scen := 2],
+  aes(colour=collab,fill=collab)
+)+geom_ribbon(
+  data=plotdata2[type=="incidence" & scen==0 & relative_time <= -7][, -c("compliance", "scen")][, test := 0][, scen := 2],
+  colour=NA, alpha=0.5,
+  aes(ymin=low95, ymax=high95, fill=collab)
+)+theme_classic(
+)+scale_colour_manual(
+  values=testcols
+)+scale_fill_manual(
+  values=testcols
+)+labs(
+  colour = "Mass tests",
+  fill = "Mass tests",
+  x = "time relative to pilot testing (days)",
+  y = "incidence (per 1000)"
+)+theme(legend.position = "bottom")
+
 #colours for prevalence plot
 prevcols = c(
   "Observed" = lshcols[7],
@@ -342,4 +424,7 @@ plot_effectiveness <- ggplot(
 (plot_effectiveness)/(plot_prevtime)+ plot_annotation(tag_levels = 'A')+plot_layout(
   heights = c(2,3)
 )
-ggsave("./results.png", units="mm", width=200, height=200)
+ggsave("./results20201227.png", units="mm", width=200, height=200)
+
+plot_inctime
+ggsave("./results_incidence20201227.png", units="mm", width=200, height=200)
